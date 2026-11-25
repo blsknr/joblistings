@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+IMAGE="joblistings:local"
+NAME="joblistings"
+LABEL="io.github.blsknr.joblistings"
+PORT="${JOBLISTINGS_PORT:-8765}"
+DOCKER=(docker)
+OWN_RUNTIME=0
+RUNTIME_STARTED=0
+FOREGROUND_OWNED=0
+KEEP_RUNTIME=0
+
+usage() {
+  cat <<'HELP'
+Verwendung: ./joblistings BEFEHL
+
+  start             Vordergrund; Ctrl+C stoppt App und eigene Colima-VM.
+  start --detach    Im Hintergrund starten.
+  stop              App stoppen; Daten bleiben erhalten.
+  stop --runtime    App und die eigene Colima-VM vollständig stoppen.
+  status            Container- und Laufzeitstatus anzeigen.
+  logs              Containerprotokoll verfolgen; Ctrl+C beendet nur die Ansicht.
+  build             Docker-Image bauen / nach Änderungen aktualisieren.
+
+Dashboard: http://localhost:8765
+Anderer Port: JOBLISTINGS_PORT=8877 ./joblistings start
+HELP
+}
+
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+
+select_runtime() {
+  command -v docker >/dev/null || fail "Docker fehlt. Bitte Docker installieren."
+  if [[ -n "${DOCKER_HOST:-}" || -n "${DOCKER_CONTEXT:-}" ]]; then
+    [[ "${DOCKER_CONTEXT:-}" != "colima-joblistings" ]] || OWN_RUNTIME=1
+  elif docker context inspect colima-joblistings >/dev/null 2>&1; then
+    DOCKER=(docker --context colima-joblistings)
+    OWN_RUNTIME=1
+  elif docker info >/dev/null 2>&1; then
+    :
+  elif [[ "$(uname -s)" == "Darwin" ]] && command -v colima >/dev/null; then
+    DOCKER=(docker --context colima-joblistings)
+    OWN_RUNTIME=1
+  fi
+}
+
+ensure_runtime() {
+  if ! "${DOCKER[@]}" info >/dev/null 2>&1; then
+    if [[ "$OWN_RUNTIME" == 1 ]]; then
+      colima start --profile joblistings --cpus 2 --memory 2 --disk 15 --activate=false
+      RUNTIME_STARTED=1
+    else
+      fail "Docker läuft nicht. Bitte deine Docker-Laufzeit starten (auf dem Mac z. B. Colima)."
+    fi
+  fi
+}
+
+has_container() { "${DOCKER[@]}" container inspect "$NAME" >/dev/null 2>&1; }
+
+check_owner() {
+  local owner
+  owner="$("${DOCKER[@]}" inspect --format '{{ index .Config.Labels "io.github.blsknr.joblistings" }}' "$NAME")"
+  [[ "$owner" == true ]] || fail "Ein fremder Container heißt bereits '$NAME'. Er wurde nicht verändert."
+}
+
+build_image() { "${DOCKER[@]}" build --tag "$IMAGE" "$ROOT"; }
+
+cleanup() {
+  local result=$?
+  trap - EXIT INT TERM
+  set +e
+  if [[ "$FOREGROUND_OWNED" == 1 ]] && has_container; then
+    if [[ "$("${DOCKER[@]}" inspect --format '{{ index .Config.Labels "io.github.blsknr.joblistings" }}' "$NAME" 2>/dev/null)" == true ]]; then
+      "${DOCKER[@]}" stop --timeout 20 "$NAME" >/dev/null 2>&1
+    fi
+  fi
+  if [[ "$KEEP_RUNTIME" == 0 && "$OWN_RUNTIME" == 1 ]] && [[ "$FOREGROUND_OWNED" == 1 || "$RUNTIME_STARTED" == 1 ]]; then
+    if "${DOCKER[@]}" info >/dev/null 2>&1 && [[ -z "$("${DOCKER[@]}" ps -q)" ]]; then
+      colima stop --profile joblistings
+    fi
+  fi
+  exit "$result"
+}
+
+start_app() {
+  local detached=0
+  case "${1:-}" in
+    "") ;;
+    --detach|-d) detached=1 ;;
+    *) fail "Unbekannte Startoption. Siehe ./joblistings help" ;;
+  esac
+  [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -ge 1024 && "$PORT" -le 65535 ]] || fail "JOBLISTINGS_PORT muss zwischen 1024 und 65535 liegen."
+  ensure_runtime
+  if has_container; then
+    check_owner
+    if [[ "$("${DOCKER[@]}" inspect --format '{{.State.Running}}' "$NAME")" == true ]]; then
+      printf 'Joblistings läuft bereits.\n'
+      "${DOCKER[@]}" port "$NAME" 8765/tcp
+      return
+    fi
+    "${DOCKER[@]}" container rm "$NAME" >/dev/null
+  fi
+  if ! "${DOCKER[@]}" image inspect "$IMAGE" >/dev/null 2>&1; then
+    build_image
+  fi
+  mkdir -p "$ROOT/data"
+  local args=(run --rm --init --name "$NAME" --label "$LABEL=true"
+    --restart=no --publish "127.0.0.1:$PORT:8765"
+    --mount "type=bind,source=$ROOT/data,target=/app/data"
+    --user "$(id -u):$(id -g)"
+    --env "JOBLISTINGS_PUBLIC_PORT=$PORT"
+    --read-only --tmpfs /tmp:rw,nosuid,size=256m
+    --shm-size=256m --cpus=2 --memory=1g --pids-limit=256
+    --cap-drop=ALL --security-opt=no-new-privileges
+    --log-driver=local --log-opt max-size=5m --log-opt max-file=2
+    --stop-timeout=20)
+  if [[ "$detached" == 1 ]]; then
+    args+=(--detach)
+  fi
+  printf 'Dashboard: http://localhost:%s\n' "$PORT"
+  if [[ "$detached" == 0 ]]; then
+    FOREGROUND_OWNED=1
+    printf 'Ctrl+C stoppt die App und die eigene Colima-VM.\n'
+  fi
+  "${DOCKER[@]}" "${args[@]}" "$IMAGE"
+  [[ "$detached" == 0 ]] || KEEP_RUNTIME=1
+}
+
+stop_app() {
+  case "${1:-}" in ""|--runtime) ;; *) fail "Unbekannte Stopoption." ;; esac
+  if "${DOCKER[@]}" info >/dev/null 2>&1 && has_container; then
+    check_owner
+    "${DOCKER[@]}" stop --timeout 20 "$NAME"
+    printf 'App gestoppt. Deine Daten bleiben in data/.\n'
+  else
+    printf 'App ist bereits gestoppt.\n'
+  fi
+  if [[ "${1:-}" == --runtime ]]; then
+    if [[ "$OWN_RUNTIME" == 1 ]]; then
+      colima stop --profile joblistings
+    else
+      printf 'Keine eigene Colima-VM ausgewählt. Andere Docker-Laufzeiten bleiben unverändert.\n'
+    fi
+  fi
+}
+
+command="${1:-help}"
+[[ $# -le 2 ]] || fail "Zu viele Argumente. Siehe ./joblistings help"
+case "$command" in help|--help|-h) usage; exit 0 ;; esac
+select_runtime
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+case "$command" in
+  start) start_app "${2:-}" ;;
+  stop) stop_app "${2:-}" ;;
+  status)
+    if "${DOCKER[@]}" info >/dev/null 2>&1; then
+      if has_container; then
+        check_owner
+        "${DOCKER[@]}" inspect --format 'App: {{.State.Status}}{{if .State.Health}} ({{.State.Health.Status}}){{end}}' "$NAME"
+        "${DOCKER[@]}" port "$NAME" 8765/tcp
+      else
+        printf 'App: gestoppt\n'
+      fi
+      printf 'Docker-Laufzeit: läuft\n'
+    else
+      printf 'App: gestoppt\nDocker-Laufzeit: gestoppt oder nicht erreichbar\n'
+    fi
+    ;;
+  logs) has_container || fail "Die App läuft nicht."; check_owner; "${DOCKER[@]}" logs --follow --tail 100 "$NAME" ;;
+  build) ensure_runtime; build_image ;;
+  *) usage; exit 1 ;;
+esac

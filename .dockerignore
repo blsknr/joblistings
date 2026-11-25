@@ -1,0 +1,11 @@
+# Only application source and locked dependencies enter the build context.
+**
+!Dockerfile
+!requirements.txt
+!app.py
+!tracker.py
+!importer.py
+!static/
+!static/**
+!tests/
+!tests/*.py

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#181c30">
+  <title>Joblistings · Dein nächster Schritt</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Zum Inhalt</a>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Joblistings Startseite"><span class="brand-mark">j<span>.</span></span><span>joblistings<span class="brand-caption">DEIN NÄCHSTER SCHRITT</span></span></a>
+    <div class="workspace-label">DEIN WORKSPACE</div>
+    <nav aria-label="Hauptnavigation">
+      <button class="nav-item active" data-view="active"><span data-icon="grid"></span>Meine Stellen<span class="nav-count" id="nav-count">0</span></button>
+      <button class="nav-item" data-view="archived"><span data-icon="archive"></span>Archiv<span class="nav-count" id="archive-count">0</span></button>
+      <button class="nav-item" id="profile-button"><span data-icon="sliders"></span>Dein Suchprofil</button>
+    </nav>
+    <div class="sidebar-card"><span class="eyebrow">DEIN FOKUS</span><h2>Deine Suche.<br>Dein nächster Schritt.</h2><p><span id="focus-role">Werkstudent · Informatik</span><br><span id="focus-hours">Dein Stundenumfang</span><br><span id="focus-region">Deine Wunschregion</span></p><span class="focus-pill">Dein Suchprofil</span></div>
+    <div class="sidebar-bottom"><a href="/api/export" class="export-link"><span data-icon="download"></span>Datensicherung exportieren</a><div class="local-note"><span data-icon="shield"></span><div>Dein Rechner. Deine Daten.<small>Alles wird lokal gespeichert.</small></div></div></div>
+  </aside>
+
+  <main id="main">
+    <header class="topbar"><span>Deine Jobsuche, an einem Ort.</span><span class="local-badge"><span></span>Lokal gespeichert</span></header>
+    <div class="content">
+      <div class="page-heading"><div><div class="eyebrow purple">WENIGER TABS. MEHR ÜBERBLICK.</div><h1 id="page-title">Deine nächste gute Stelle.</h1><p id="page-subtitle">Sammeln, sortieren, dranbleiben. Ein Link ist der Anfang.</p></div><div class="date-label" id="today"></div></div>
+
+      <section class="import-panel" aria-labelledby="import-title"><div class="import-copy"><div class="import-symbol" data-icon="link"></div><div><h2 id="import-title">Link rein. Kopf frei.</h2><p>Stellenlink einfügen. Die Details übernehmen wir für dich.</p></div></div><form id="import-form"><label class="sr-only" for="job-url">Link zur Stellenanzeige</label><div class="url-input"><span data-icon="link"></span><input type="text" inputmode="url" id="job-url" placeholder="https://unternehmen.de/karriere/deine-stelle" autocomplete="off" required maxlength="4096"><button type="submit" id="import-button"><span data-icon="plus"></span>Stelle merken</button></div><div class="import-footnote"><span>Direkt von der Unternehmensseite. Automatisch erfasst.</span><span id="import-feedback" role="status"></span></div></form></section>
+
+      <section class="stats" aria-label="Übersicht"><div class="stat"><span class="stat-label">Gesammelte Stellen<span class="stat-icon lilac" data-icon="layers"></span></span><div><strong id="stat-total">0</strong><span>in deiner Übersicht</span></div></div><div class="stat"><span class="stat-label">Bewerbungen<span class="stat-icon blue" data-icon="send"></span></span><div><strong id="stat-applied">0</strong><span>bereits auf den Weg gebracht</span></div></div><div class="stat"><span class="stat-label">Gespräche<span class="stat-icon green" data-icon="chat"></span></span><div><strong id="stat-interview">0</strong><span>zum Kennenlernen</span></div></div></section>
+
+      <section class="jobs-section" aria-labelledby="jobs-title"><div class="section-heading"><h2 id="jobs-title">Deine Stellen <span id="result-count">0</span></h2><span class="subtle" id="pending-label"></span></div><div class="toolbar"><div class="search-input"><span data-icon="search"></span><input type="search" id="search" aria-label="Stellen durchsuchen" placeholder="Stelle, Unternehmen oder Ort suchen"></div><label class="filter-label"><span class="sr-only">Status filtern</span><select id="status-filter"><option value="">Alle Status</option></select></label><label class="filter-label"><span class="sr-only">Sortieren</span><select id="sort"><option value="new">Zuletzt hinzugefügt</option><option value="company">Unternehmen A–Z</option><option value="updated">Zuletzt bearbeitet</option></select></label></div><div id="load-error" class="error-banner" role="alert" hidden></div><div class="list-head" aria-hidden="true"><span>STELLE & UNTERNEHMEN</span><span>RAHMENBEDINGUNGEN</span><span>STATUS</span><span>GEMERKT</span><span></span></div><div id="job-list" aria-live="polite"></div><div class="list-footer"><span id="list-summary">Noch keine Stellen gespeichert</span><span>Ein guter nächster Schritt reicht.</span></div></section>
+      <footer class="page-footer"><span>Deine Suche. Dein Tempo.</span><span id="footer-profile">Dein persönlicher Stellenüberblick</span></footer>
+    </div>
+  </main>
+
+  <dialog id="detail-dialog" class="detail-dialog"><div class="drawer-top"><span class="eyebrow">STELLENDETAILS</span><button class="icon-button close-detail" aria-label="Details schließen"><span data-icon="close"></span></button></div><div id="detail-content"></div></dialog>
+  <dialog id="profile-dialog" class="profile-dialog"><div class="drawer-top"><span class="eyebrow">DEIN SUCHPROFIL</span><button class="icon-button" id="close-profile" aria-label="Suchprofil schließen"><span data-icon="close"></span></button></div><h2>Was zu dir passt.</h2><p class="subtle">Diese Kriterien helfen dir, offene Fragen schnell zu erkennen.</p><dl id="profile-content"></dl><p class="profile-note">Unbekannte Angaben bleiben offen. Gespeicherte Stellen werden wegen einer Abweichung nicht gelöscht.</p></dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>

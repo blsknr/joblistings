@@ -1,0 +1,15 @@
+.venv/
+.cache/
+.browsers/
+__pycache__/
+*.pyc
+data/
+.DS_Store
+IDEA.md
+.env
+.env.*
+!.env.example
+*.sqlite3*
+*.db
+*.pem
+*.key
