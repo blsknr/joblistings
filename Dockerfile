@@ -20,7 +20,7 @@ RUN apt-get update \
     && mkdir /app/data \
     && chown joblistings:joblistings /app/data
 
-COPY app.py tracker.py importer.py profiles.py taxonomy.py ./
+COPY app.py tracker.py importer.py profiles.py taxonomy.py job_metadata.py ./
 COPY static/ ./static/
 COPY tests/ ./tests/
 

@@ -8,6 +8,7 @@ import socket
 import ssl
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin, urlsplit
+from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener, HTTPSHandler
 
 import certifi
@@ -15,10 +16,22 @@ from bs4 import BeautifulSoup
 
 import tracker
 from taxonomy import infer_job_type
+from job_metadata import extract_metadata, locations_from_text, postings, select_posting
 
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(tracker.ROOT / ".browsers"))
 POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="job-import")
 AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+
+class PageReadError(ValueError):
+    def __init__(self, status):
+        if status in {404, 410}:
+            message = f"Die Anzeige ist unter diesem Link nicht mehr erreichbar (HTTP {status}). Dein gespeicherter Eintrag bleibt erhalten."
+        elif status in {401, 403, 429}:
+            message = f"Die Karriereseite erlaubt den automatischen Abruf gerade nicht (HTTP {status}). Bitte später erneut versuchen oder den Anzeigentext einfügen."
+        else:
+            message = f"Die Karriereseite antwortet mit einem Fehler (HTTP {status}). Bitte später erneut versuchen."
+        super().__init__(message)
 
 
 def validate_public_url(url):
@@ -42,7 +55,12 @@ class SafeRedirect(HTTPRedirectHandler):
 def fetch_html(url):
     validate_public_url(url)
     opener = build_opener(SafeRedirect(), HTTPSHandler(context=ssl.create_default_context(cafile=certifi.where())))
-    with opener.open(Request(url, headers={"User-Agent": AGENT, "Accept-Language": "de-DE,de;q=0.9"}), timeout=25) as response:
+    try:
+        response = opener.open(Request(url, headers={"User-Agent": AGENT, "Accept-Language": "de-DE,de;q=0.9"}), timeout=25)
+    except HTTPError as exc:
+        exc.close()
+        raise PageReadError(exc.code) from exc
+    with response:
         content_type = response.headers.get_content_type()
         if content_type not in {"text/html", "application/xhtml+xml"}:
             raise ValueError("Dieser Link führt nicht zu einer lesbaren Webseite.")
@@ -57,22 +75,7 @@ def plain(html):
 
 
 def structured_jobs(soup):
-    def walk(value):
-        if isinstance(value, list):
-            for item in value:
-                yield from walk(item)
-        elif isinstance(value, dict):
-            kind = value.get("@type", [])
-            if kind == "JobPosting" or isinstance(kind, list) and "JobPosting" in kind:
-                yield value
-            for key, item in value.items():
-                if key in {"@graph", "mainEntity", "itemListElement", "item"}:
-                    yield from walk(item)
-    for script in soup.select('script[type="application/ld+json"]'):
-        try:
-            yield from walk(json.loads(script.string or script.get_text()))
-        except (ValueError, TypeError):
-            continue
+    yield from postings(soup)
 
 
 def first_match(pattern, text, flags=re.I):
@@ -83,20 +86,14 @@ def first_match(pattern, text, flags=re.I):
 def parse_html(html, url):
     soup = BeautifulSoup(html, "html.parser")
     candidates = list(structured_jobs(soup))
-    job = candidates[0] if len(candidates) == 1 else {}
-    # Avoid importing the first item of a whole job board as the selected job.
-    if len(candidates) > 1:
-        ids = re.findall(r"(?:jobDetailId=|/job/|/)(\d{4,})", url)
-        for candidate in candidates:
-            identity = json.dumps([candidate.get("identifier"), candidate.get("url")])
-            if any(identifier in identity for identifier in ids):
-                job = candidate
-                break
-    title = plain(job.get("title", ""))
-    # Some boards show a job in a dialog beside the full result list.
-    detail = soup.select_one("main.job-detail, [role='dialog'] main, [role='dialog'] article")
-    if detail:
-        soup = BeautifulSoup(str(detail), "html.parser")
+    job = select_posting(candidates, url, soup)
+    metadata, metadata_sources, scope = extract_metadata(soup, job)
+    page_title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    site_meta = soup.select_one('meta[property="og:site_name"]')
+    site_name = site_meta.get("content", "") if site_meta else ""
+    og_title = soup.select_one('meta[property="og:title"]')
+    title = plain(metadata.get("title", ""))
+    soup = BeautifulSoup(str(scope), "html.parser")
     for unwanted in soup.select("script, style, nav, footer, aside, noscript, svg, [role='navigation'], #onetrust-banner-sdk, #onetrust-consent-sdk, .cookie-banner"):
         unwanted.decompose()
     for header in soup.select("header"):
@@ -105,9 +102,9 @@ def parse_html(html, url):
     heading = soup.select_one("h1")
     if not title:
         title = heading.get_text(" ", strip=True) if heading else ""
-    if not title and soup.title:
-        title = re.split(r"\s+[|–]\s+", soup.title.get_text(" ", strip=True))[0]
-    description = plain(job.get("description", ""))
+    if not title:
+        title = og_title.get("content", "") if og_title else re.split(r"\s+[|–]\s+", page_title)[0]
+    description = plain(metadata.get("description", ""))
     main = soup.select_one("main, article, [role='main']") or soup.body or soup
     if not description:
         description = main.get_text("\n", strip=True)
@@ -115,30 +112,15 @@ def parse_html(html, url):
         if heading and title in description:
             description = description[description.find(title):]
     description = re.sub(r"\n{3,}", "\n\n", description)[:100000]
-    company = job.get("hiringOrganization", {})
-    company = company.get("name", "") if isinstance(company, dict) else ""
+    company = metadata.get("company", "")
     hostname = urlsplit(url).hostname or ""
     known = {"avat.de": "AVAT", "personio.de": "AVAT" if "avat." in hostname else "", "transnetbw.de": "TransnetBW", "hensoldt.net": "HENSOLDT"}
     if not company:
         company = next((v for domain, v in known.items() if hostname == domain or hostname.endswith("." + domain)), "")
     if not company:
-        meta = soup.select_one('meta[property="og:site_name"]')
-        company = meta.get("content", "") if meta else hostname.removeprefix("www.")
-    locations = job.get("jobLocation", [])
-    locations = locations if isinstance(locations, list) else [locations]
-    cities = []
-    for location in locations:
-        address = location.get("address", {}) if isinstance(location, dict) else {}
-        if isinstance(address, dict) and address.get("addressLocality"):
-            cities.append(address["addressLocality"])
-    location = ", ".join(dict.fromkeys(cities))
-    if not location:
-        found = re.search(r"(?:Einsatzort\s+ist|(?:Standort|Arbeitsort|Dienstort)\s*:)[ \t\n]*([^\n.]{2,85})", description, re.I)
-        if found:
-            location = found.group(1).strip()
-        else:
-            location = first_match(r"\b(?:Stuttgart|Böblingen|Sindelfingen|Tübingen|Reutlingen|Walldorf|Ulm|München|Berlin|Karlsruhe|Esslingen|Filderstadt|Leinfelden-Echterdingen)\b", title + "\n" + description[:1200])
-    hours = str(job.get("workHours", ""))
+        company = site_name or hostname.removeprefix("www.")
+    location = metadata.get("location") or locations_from_text(description) or locations_from_text(main.get_text("\n", strip=True))
+    hours = str(job.get("workHours") or metadata.get("hours") or "")
     if not hours:
         hours = first_match(r"(?:\b(?:bis\s+zu|mindestens|maximal|ca\.)\s+)?\b\d{1,2}(?:[.,]\d)?(?:\s*(?:–|-|bis)\s*\d{1,2}(?:[.,]\d)?)?\s*(?:Wochenstunden|(?:Stunden|Std\.?|h)\s*(?:/\s*(?:Woche|Wo\.?|week)|pro\s+Woche|wöchentlich))", description)
     remote = ""
@@ -188,13 +170,17 @@ def parse_html(html, url):
                 apply_url = target
                 break
     data = dict(title=title, company=company, location=location, hours=hours, remote=remote, salary=salary,
-                industry=industry, job_type=infer_job_type(title, job.get("employmentType", "")), deadline=str(job.get("validThrough", "")), description=description, apply_url=apply_url)
+                industry=industry, job_type=infer_job_type(title, job.get("employmentType") or metadata.get("employment_type", "")), deadline=str(job.get("validThrough") or metadata.get("deadline") or ""), description=description, apply_url=apply_url)
     data["sources"] = {key: ("Aus Anzeigentext abgeleitet · bitte prüfen" if key == "industry" else "Aus Stellenanzeige übernommen")
                        for key, value in data.items() if value}
+    data["sources"].update({key: source for key, source in metadata_sources.items() if key in data and data[key]})
+    if location and not metadata.get("location"):
+        data["sources"]["location"] = "Beschrifteter Arbeitsort im Anzeigentext"
     # A generic board title or consent page isn't a successfully imported ad.
     board = re.fullmatch(r"stellenangebote|karriere|jobs|careers|jobangebote|offene stellen|stellenübersicht|access denied|just a moment.*", title.strip(), re.I)
     useful = bool(title and not board and (apply_url or re.search(r"aufgaben|anforderungen|profil|wir bieten|qualifikationen|responsibilities|requirements|qualifications", description, re.I)))
-    data["_complete"] = bool(job or useful and len(description) > 250)
+    ambiguous = len(candidates) > 1 and not job
+    data["_complete"] = not ambiguous and bool(job.get("title") and job.get("description") or useful and len(description) > 250)
     return data
 
 
@@ -225,7 +211,9 @@ def render_html(url):
                     route.abort()
 
             page.route("**/*", route_request)
-            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            response = page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            if response and response.status >= 400:
+                raise PageReadError(response.status)
             # Allow asynchronous corporate career widgets to populate; bounded wait.
             try:
                 if "jobDetailId=" in url:
@@ -250,22 +238,44 @@ def render_html(url):
             browser.close()
 
 
+def read_ad(url, manual_fields=()):
+    data = {}
+    error = None
+    if "jobDetailId=" not in url:
+        try:
+            data = parse_html(fetch_html(url), url)
+        except Exception as exc:
+            error = exc
+    missing_location = not data.get("location") and data.get("remote") != "Vollständig remote" and "location" not in manual_fields
+    if not data.get("_complete") or missing_location:
+        try:
+            rendered = parse_html(render_html(url), url)
+            if rendered.get("_complete"):
+                if not data.get("_complete"):
+                    data = rendered
+                elif re.sub(r"\W+", "", data["title"]).casefold() == re.sub(r"\W+", "", rendered["title"]).casefold():
+                    # Enrich the same ad; never replace a good static result with a shell,
+                    # a different job, or empty browser fields.
+                    for key, value in rendered.items():
+                        if key not in {"sources", "_complete"} and value and not data.get(key):
+                            data[key] = value
+                            if key in rendered["sources"]:
+                                data["sources"][key] = rendered["sources"][key]
+        except Exception as exc:
+            error = exc
+    if not data.pop("_complete", False):
+        if isinstance(error, PageReadError):
+            raise error
+        raise ValueError("Die Stellenanzeige konnte nicht eindeutig erkannt werden. Der Link bleibt gespeichert. Du kannst den Anzeigentext ergänzen oder den Import erneut versuchen.")
+    message = "Anzeige übernommen. Offene Angaben kannst du später ergänzen." if data.get("location") else "Anzeige übernommen. Der Standort ist auf der Seite nicht eindeutig erkennbar."
+    data.update(import_state="ready", import_message=message, imported_at=tracker.now())
+    return data
+
+
 def run_import(job_id):
     try:
         entry = tracker.get_job(job_id)
-        url = entry["url"]
-        data = {}
-        if "jobDetailId=" not in url:
-            try:
-                data = parse_html(fetch_html(url), url)
-            except Exception:
-                pass
-        if not data.get("_complete"):
-            data = parse_html(render_html(url), url)
-        complete = data.pop("_complete", False)
-        if not complete:
-            raise ValueError("Die Stellenanzeige konnte nicht eindeutig erkannt werden. Der Link bleibt gespeichert. Du kannst den Anzeigentext ergänzen oder den Import erneut versuchen.")
-        data.update(import_state="ready", import_message="Anzeige übernommen. Offene Angaben kannst du später ergänzen.", imported_at=tracker.now())
+        data = read_ad(entry["url"], entry["manual_fields"])
         tracker.update_job(job_id, data, imported=True)
     except Exception as exc:
         message = str(exc) if isinstance(exc, ValueError) else "Die Seite konnte gerade nicht gelesen werden. Dein Link ist gespeichert. Erneut versuchen oder Anzeigentext einfügen."
