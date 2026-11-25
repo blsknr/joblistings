@@ -26,7 +26,7 @@ COPY tests/ ./tests/
 
 USER joblistings
 EXPOSE 8765
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=60s --timeout=3s --start-period=10s --retries=3 \
     CMD python -c "from urllib.request import urlopen; urlopen('http://127.0.0.1:8765/api/health', timeout=2)"
 STOPSIGNAL SIGTERM
 CMD ["python", "app.py"]

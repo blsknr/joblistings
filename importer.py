@@ -1,6 +1,7 @@
 """Read public job ads. No login, form filling, or submission."""
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -269,6 +270,7 @@ def run_import(job_id):
     except Exception as exc:
         message = str(exc) if isinstance(exc, ValueError) else "Die Seite konnte gerade nicht gelesen werden. Dein Link ist gespeichert. Erneut versuchen oder Anzeigentext einfügen."
         tracker.update_job(job_id, {"import_state": "error", "import_message": message}, imported=True)
+        logging.getLogger(__name__).error("Stellenimport %s fehlgeschlagen: %s", job_id, message)
 
 
 def enqueue(job_id):

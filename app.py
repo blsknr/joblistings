@@ -18,6 +18,11 @@ from taxonomy import JOB_TYPES, WORK_MODELS
 class Handler(BaseHTTPRequestHandler):
     server_version = "Joblistings"
 
+    def log_request(self, code="-", size="-"):
+        # Keep normal browsing, polling, and successful healthchecks quiet.
+        if str(code).isdigit() and int(code) >= 400:
+            super().log_request(code, size)
+
     def respond(self, status, value, content_type="application/json; charset=utf-8", extra=None):
         data = json.dumps(value, ensure_ascii=False).encode() if content_type.startswith("application/json") else value
         self.send_response(status)
