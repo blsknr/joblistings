@@ -1,6 +1,6 @@
 # Joblistings
 
-Lokaler Stellen- und Bewerbungstracker. Benötigt Docker mit laufender Engine.
+Lokaler Tracker für Bewerbungen und Stellen
 
 ## Starten
 
