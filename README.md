@@ -23,7 +23,7 @@ Das baut das Image beim ersten Start und führt den Container im Vordergrund aus
 ./joblistings build           # Image nach Quellcodeänderungen neu bauen
 ```
 
-Alle Daten bleiben in `./data/`, auch nach dem Stoppen. Den Ordner bei gestoppter App sichern. Das persönliche Suchprofil steht in `data/profile.json` und wird nicht veröffentlicht.
+Alle Daten bleiben in `./data/`, auch nach dem Stoppen. Den Ordner bei gestoppter App sichern. Das persönliche Suchprofil lässt sich unter **Suchprofil** bearbeiten und liegt in `data/profile.json`. Es wird nicht veröffentlicht.
 
 Anderer Port: `JOBLISTINGS_PORT=8877 ./joblistings start`.
 

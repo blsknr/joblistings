@@ -81,6 +81,20 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(json.loads(raw)["status"], "ok")
 
+    def test_profile_can_be_saved_and_used_by_existing_jobs(self):
+        status, raw = self.request("/api/profile")
+        self.assertEqual(status, 200)
+        self.assertIn("Ausbildung", json.loads(raw)["job_types"])
+        status, raw = self.request("/api/profile", "PATCH", {"name": "Meine neue Suche", "job_types": ["Vollzeit"], "fields": ["Pflege"], "categories": ["Interessant"]})
+        self.assertEqual(status, 200)
+        data = json.loads(raw)
+        self.assertEqual(data["profile"]["role"], "Vollzeit · Pflege")
+        self.assertIn("jobs", data)
+        status, raw = self.request("/api/profile", "PATCH", {"hours_min": 40, "hours_max": 20})
+        self.assertEqual(status, 400)
+        status, raw = self.request("/api/profile", "PATCH", {"name": "Fremd"}, {"Origin": "https://evil.example"})
+        self.assertEqual(status, 403)
+
     def test_invalid_json_and_missing_job_are_recoverable_errors(self):
         status, _ = self.request("/api/jobs", "POST", {"url": ""})
         self.assertEqual(status, 400)

@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 import importer
 import tracker
+from taxonomy import JOB_TYPES, WORK_MODELS
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -59,14 +60,16 @@ class Handler(BaseHTTPRequestHandler):
         if not self.valid_request():
             return
         path = urlsplit(self.path).path
+        if path == "/api/profile":
+            return self.respond(200, {"profile": tracker.get_profile(), "job_types": JOB_TYPES, "work_models": WORK_MODELS})
         if path == "/api/health":
             return self.respond(200, {"status": "ok"})
         if path == "/api/jobs":
-            return self.respond(200, {"jobs": tracker.list_jobs(), "statuses": tracker.STATUSES, "profile": tracker.get_profile()})
+            return self.respond(200, {"jobs": tracker.list_jobs(), "statuses": tracker.STATUSES, "profile": tracker.get_profile(), "options": {"job_types": JOB_TYPES, "work_models": WORK_MODELS}})
         if path == "/api/export":
             return self.respond(200, {"version": 1, "exported_at": tracker.now(), "profile": tracker.get_profile(), "jobs": tracker.list_jobs()},
                                 extra={"Content-Disposition": 'attachment; filename="joblistings-backup.json"'})
-        allowed = {"/": "index.html", "/style.css": "style.css", "/app.js": "app.js", "/icon.svg": "icon.svg"}
+        allowed = {"/": "index.html", "/style.css": "style.css", "/app.js": "app.js", "/profile.js": "profile.js", "/icon.svg": "icon.svg"}
         if path not in allowed:
             return self.respond(404, {"error": "Nicht gefunden."})
         file = tracker.ROOT / "static" / allowed[path]
@@ -84,6 +87,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             data = self.body()
+            if self.path == "/api/profile" and method == "PATCH":
+                profile = tracker.update_profile(data)
+                return self.respond(200, {"profile": profile, "jobs": tracker.list_jobs()})
             if self.path == "/api/jobs" and method == "POST":
                 url = data.get("url", "")
                 if not isinstance(url, str) or not url.strip():
@@ -122,7 +128,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Lokaler Werkstudenten-Tracker")
+    parser = argparse.ArgumentParser(description="Lokaler Stellen- und Bewerbungstracker")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", default=os.environ.get("JOBLISTINGS_HOST", "127.0.0.1"))
     parser.add_argument("--open-browser", action="store_true")

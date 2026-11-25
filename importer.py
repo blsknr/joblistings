@@ -13,6 +13,7 @@ import certifi
 from bs4 import BeautifulSoup
 
 import tracker
+from taxonomy import infer_job_type
 
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(tracker.ROOT / ".browsers"))
 POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="job-import")
@@ -186,11 +187,12 @@ def parse_html(html, url):
                 apply_url = target
                 break
     data = dict(title=title, company=company, location=location, hours=hours, remote=remote, salary=salary,
-                industry=industry, deadline=str(job.get("validThrough", "")), description=description, apply_url=apply_url)
+                industry=industry, job_type=infer_job_type(title, job.get("employmentType", "")), deadline=str(job.get("validThrough", "")), description=description, apply_url=apply_url)
     data["sources"] = {key: ("Aus Anzeigentext abgeleitet · bitte prüfen" if key == "industry" else "Aus Stellenanzeige übernommen")
                        for key, value in data.items() if value}
     # A generic board title or consent page isn't a successfully imported ad.
-    useful = bool(re.search(r"werkstudent|working student|studentische|praktik|software|developer|entwickl|informatik|engineer", title, re.I))
+    board = re.fullmatch(r"stellenangebote|karriere|jobs|careers|jobangebote|offene stellen|stellenübersicht|access denied|just a moment.*", title.strip(), re.I)
+    useful = bool(title and not board and (apply_url or re.search(r"aufgaben|anforderungen|profil|wir bieten|qualifikationen|responsibilities|requirements|qualifications", description, re.I)))
     data["_complete"] = bool(job or useful and len(description) > 250)
     return data
 
@@ -228,7 +230,7 @@ def render_html(url):
                 if "jobDetailId=" in url:
                     page.wait_for_selector("main.job-detail h1, [role='dialog'] h1", timeout=15000)
                 else:
-                    page.wait_for_function("() => /Werkstudent|Working Student|studentische/i.test(document.body.innerText) && document.body.innerText.length > 1000", timeout=15000)
+                    page.wait_for_function("() => /Aufgaben|Anforderungen|Profil|Wir bieten|Responsibilities|Requirements|Qualifications/i.test(document.body.innerText) && document.body.innerText.length > 1000", timeout=15000)
             except Exception:
                 pass
             page.wait_for_timeout(1500)

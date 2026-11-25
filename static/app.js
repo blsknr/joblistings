@@ -24,8 +24,9 @@ const $ = selector => document.querySelector(selector);
 const escapeHTML = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
 const safeLink = value => { try { const url = new URL(value); return ["https:", "http:"].includes(url.protocol) ? escapeHTML(url.href) : ""; } catch { return ""; } };
 const date = value => new Intl.DateTimeFormat("de-DE", { day: "2-digit", month: "short" }).format(new Date(value));
-let state = { jobs: [], statuses: [], profile: {}, view: "active", selected: null, dirty: false };
+let state = { jobs: [], statuses: [], profile: {}, options: {job_types: [], work_models: {}}, view: "active", selected: null, dirty: false };
 let toastTimer, pollTimer;
+let profileDirty = false;
 
 function hydrateIcons(root = document) { root.querySelectorAll("[data-icon]").forEach(el => el.innerHTML = icon(el.dataset.icon)); }
 hydrateIcons();
@@ -58,10 +59,12 @@ async function load() {
     const data = await api("/api/jobs");
     const previousSelected = state.jobs.find(job => job.id === state.selected);
     const firstLoad = !state.statuses.length;
+    const profileChanged = JSON.stringify(state.profile) !== JSON.stringify(data.profile);
     Object.assign(state, data);
     $("#load-error").hidden = true;
     if (firstLoad) $("#status-filter").innerHTML = '<option value="">Alle Status</option>' + state.statuses.map(value => `<option>${escapeHTML(value)}</option>`).join("");
     render();
+    if (state.view === "profile" && !profileDirty && (profileChanged || firstLoad)) renderProfileForm();
     const selected = state.jobs.find(job => job.id === state.selected);
     if (selected && previousSelected?.import_state === "pending" && selected.import_state !== "pending" && !state.dirty && $("#detail-dialog").open) renderDetail(selected);
   } catch (error) {
@@ -78,6 +81,10 @@ function statusOptions(value) {
 
 function render() {
   const p = state.profile;
+  $("#focus-name").textContent = p.name || "Meine Jobsuche";
+  $("#dashboard-eyebrow").textContent = p.name || "DEINE JOBSUCHE";
+  $("#focus-model").textContent = state.options.work_models[p.work_model] || "Frei anpassbar";
+  $("#profile-onboarding").hidden = Boolean((p.job_types || []).length || (p.fields || []).length || (p.cities || []).length);
   $("#focus-role").textContent = p.role || "Deine Jobsuche";
   $("#focus-hours").textContent = p.hours_min != null && p.hours_max != null ? `${p.hours_min}–${p.hours_max} Std. / Woche` : p.hours || "Stundenumfang offen";
   $("#focus-region").textContent = (p.cities || []).slice(0, 2).join(" & ") || "Deine Wunschregion";
@@ -91,9 +98,15 @@ function render() {
   const query = $("#search").value.trim().toLocaleLowerCase("de");
   const filter = $("#status-filter").value;
   const sort = $("#sort").value;
+  const categories = [...new Set([...(p.categories || []), ...state.jobs.map(job => job.category).filter(Boolean)])];
+  const types = [...new Set(state.jobs.map(job => job.job_type).filter(Boolean))];
+  updateFilter($("#category-filter"), categories, "Alle Kategorien");
+  updateFilter($("#job-type-filter"), types, "Alle Jobarten");
+  const category = $("#category-filter").value;
+  const jobType = $("#job-type-filter").value;
   let jobs = state.jobs.filter(job => job.archived === (state.view === "archived"));
   const total = jobs.length;
-  jobs = jobs.filter(job => (!filter || job.status === filter) && (!query || [job.title, job.company, job.location, job.notes, job.industry].join(" ").toLocaleLowerCase("de").includes(query)));
+  jobs = jobs.filter(job => (!filter || job.status === filter) && (!category || job.category === category) && (!jobType || job.job_type === jobType) && (!query || [job.title, job.company, job.location, job.notes, job.industry, job.job_type, job.category].join(" ").toLocaleLowerCase("de").includes(query)));
   jobs.sort((a, b) => sort === "company" ? a.company.localeCompare(b.company, "de") : (sort === "updated" ? b.updated_at.localeCompare(a.updated_at) : b.created_at.localeCompare(a.created_at)) || b.id - a.id);
   $("#result-count").textContent = jobs.length;
   $("#list-summary").textContent = total ? `${jobs.length} von ${total} ${total === 1 ? "Stelle" : "Stellen"}` : "Noch keine Stellen gespeichert";
@@ -102,18 +115,18 @@ function render() {
   $("#page-subtitle").textContent = state.view === "archived" ? "Archivierte Stellen bleiben erhalten. Du kannst sie jederzeit zurückholen." : "Sammeln, sortieren, dranbleiben. Ein Link ist der Anfang.";
   const pending = state.jobs.filter(job => job.import_state === "pending").length;
   $("#pending-label").innerHTML = pending ? `<span class="spinner"></span> ${pending} ${pending === 1 ? "Import läuft" : "Importe laufen"}` : "";
-  document.querySelectorAll("[data-view]").forEach(button => { button.classList.toggle("active", button.dataset.view === state.view); button.setAttribute("aria-current", button.dataset.view === state.view ? "page" : "false"); });
+  document.querySelectorAll(".nav-item[data-view]").forEach(button => { button.classList.toggle("active", button.dataset.view === state.view); button.setAttribute("aria-current", button.dataset.view === state.view ? "page" : "false"); });
   $(".list-head").hidden = !jobs.length;
   if (!jobs.length) {
     const filtered = total > 0;
-    $("#job-list").innerHTML = `<div class="empty-state"><div class="empty-symbol">${icon(filtered ? "search" : "briefcase")}</div><h3>${filtered ? "Hier passt gerade keine Stelle." : state.view === "archived" ? "Dein Archiv ist noch leer." : "Dein nächster Schritt beginnt hier."}</h3><p>${filtered ? "Versuche einen anderen Suchbegriff oder ändere den Statusfilter." : state.view === "archived" ? "Stellen, die du nicht mehr verfolgen möchtest, kannst du hier aufbewahren." : "Du hast eine interessante Stelle gefunden? Füge oben den Link ein. Wir kümmern uns um die Details."}</p><button class="text-button" id="empty-action">${filtered ? "Filter zurücksetzen" : state.view === "archived" ? "Zu deinen Stellen" : "Ersten Stellenlink einfügen"}</button></div>`;
-    $("#empty-action").onclick = () => { if (filtered) { $("#search").value = ""; $("#status-filter").value = ""; render(); } else if (state.view === "archived") { state.view = "active"; render(); } else $("#job-url").focus(); };
+    $("#job-list").innerHTML = `<div class="empty-state"><div class="empty-symbol">${icon(filtered ? "search" : "briefcase")}</div><h3>${filtered ? "Hier passt gerade keine Stelle." : state.view === "archived" ? "Dein Archiv ist noch leer." : "Dein nächster Schritt beginnt hier."}</h3><p>${filtered ? "Versuche einen anderen Suchbegriff oder ändere deine Filter." : state.view === "archived" ? "Stellen, die du nicht mehr verfolgen möchtest, kannst du hier aufbewahren." : "Du hast eine interessante Stelle gefunden? Füge oben den Link ein. Wir kümmern uns um die Details."}</p><button class="text-button" id="empty-action">${filtered ? "Filter zurücksetzen" : state.view === "archived" ? "Zu deinen Stellen" : "Ersten Stellenlink einfügen"}</button></div>`;
+    $("#empty-action").onclick = () => { if (filtered) { $("#search").value = ""; $("#status-filter").value = ""; $("#category-filter").value = ""; $("#job-type-filter").value = ""; render(); } else if (state.view === "archived") { state.view = "active"; render(); } else $("#job-url").focus(); };
     return;
   }
   $("#job-list").innerHTML = jobs.map(job => {
     const initials = job.company.replace(/^(www\.|jobs\.)/, "").slice(0, 2).toUpperCase();
     const flags = job.flags;
-    return `<article class="job-row" tabindex="0" data-id="${job.id}" aria-label="Details: ${escapeHTML(job.title || job.company)}"><div class="job-main"><div class="company-mark" data-color="${job.id % 4}" aria-hidden="true">${escapeHTML(initials)}</div><div><h3 class="job-title">${escapeHTML(job.title || (job.import_state === "pending" ? "Stellenanzeige wird gelesen …" : "Gespeicherter Stellenlink"))}</h3><div class="company-name">${escapeHTML(job.company)}</div>${job.import_state === "pending" ? '<div class="import-status"><span class="spinner"></span>Details werden übernommen</div>' : job.import_state === "error" ? '<div class="import-status error">Link gespeichert · Import prüfen</div>' : ""}</div></div><div class="job-conditions"><div class="job-meta">${icon("pin")} ${escapeHTML(job.location || "Standort offen")}${job.hours ? " · " + escapeHTML(job.hours) : ""}</div><div class="flags">${flags.slice(0, 4).map(flag => `<span class="flag ${flag.kind}">${escapeHTML(flag.text)}</span>`).join("")}</div></div><div class="job-status"><select class="status-select" data-id="${job.id}" data-status="${escapeHTML(job.status)}" aria-label="Status für ${escapeHTML(job.title || job.company)}">${statusOptions(job.status)}</select></div><time class="job-date" datetime="${escapeHTML(job.created_at)}">${date(job.created_at)}</time><button class="open-detail" aria-label="Stellendetails öffnen">${icon("external")}</button></article>`;
+    return `<article class="job-row" tabindex="0" data-id="${job.id}" aria-label="Details: ${escapeHTML(job.title || job.company)}"><div class="job-main"><div class="company-mark" data-color="${job.id % 4}" aria-hidden="true">${escapeHTML(initials)}</div><div><h3 class="job-title">${escapeHTML(job.title || (job.import_state === "pending" ? "Stellenanzeige wird gelesen …" : "Gespeicherter Stellenlink"))}</h3><div class="company-name">${escapeHTML(job.company)}</div><div class="job-taxonomy">${job.job_type ? `<span>${escapeHTML(job.job_type)}</span>` : ""}${job.category ? `<span class="category-tag">${escapeHTML(job.category)}</span>` : ""}</div>${job.import_state === "pending" ? '<div class="import-status"><span class="spinner"></span>Details werden übernommen</div>' : job.import_state === "error" ? '<div class="import-status error">Link gespeichert · Import prüfen</div>' : ""}</div></div><div class="job-conditions"><div class="job-meta">${icon("pin")} ${escapeHTML(job.location || "Standort offen")}${job.hours ? " · " + escapeHTML(job.hours) : ""}</div><div class="flags">${flags.map(flag => `<span class="flag ${flag.kind}">${escapeHTML(flag.text)}</span>`).join("")}</div></div><div class="job-status"><select class="status-select" data-id="${job.id}" data-status="${escapeHTML(job.status)}" aria-label="Status für ${escapeHTML(job.title || job.company)}">${statusOptions(job.status)}</select></div><time class="job-date" datetime="${escapeHTML(job.created_at)}">${date(job.created_at)}</time><button class="open-detail" aria-label="Stellendetails öffnen">${icon("external")}</button></article>`;
   }).join("");
   document.querySelectorAll(".job-row").forEach(row => {
     row.addEventListener("click", event => { if (!event.target.closest("select")) openDetail(Number(row.dataset.id)); });
@@ -141,7 +154,7 @@ function openDetail(id) {
 
 function renderDetail(job) {
   const fieldHTML = fields.map(([name, label, placeholder, full]) => `<div class="field${full ? " full" : ""}"><label for="field-${name}">${label}</label><input id="field-${name}" name="${name}" value="${escapeHTML(job[name])}" placeholder="${placeholder}" maxlength="10000">${job.sources[name] ? `<small>${escapeHTML(job.sources[name])}</small>` : ""}</div>`).join("");
-  $("#detail-content").innerHTML = `<div class="detail-header"><div class="company-name">${escapeHTML(job.company)}</div><h2>${escapeHTML(job.title || "Gespeicherter Stellenlink")}</h2><div class="flags">${job.flags.map(flag => `<span class="flag ${flag.kind}">${escapeHTML(flag.text)}</span>`).join("")}</div></div><div class="detail-links"><a href="${safeLink(job.url)}" target="_blank" rel="noopener noreferrer">${icon("external")}Originalanzeige</a>${safeLink(job.apply_url) ? `<a href="${safeLink(job.apply_url)}" target="_blank" rel="noopener noreferrer">${icon("briefcase")}Zum Bewerbungsportal</a>` : ""}</div><div class="notice${job.import_state === "error" ? " error" : ""}" role="status">${job.import_state === "pending" ? '<span class="spinner"></span> ' : ""}${escapeHTML(job.import_message || "Dein Link ist gespeichert.")}${job.imported_at ? `<br><small>Zuletzt eingelesen: ${date(job.imported_at)}</small>` : ""}</div><form id="detail-form" class="detail-form"><div class="field-grid"><div class="field full"><label for="field-status">Bewerbungsstatus</label><select name="status" id="field-status">${statusOptions(job.status)}</select></div>${fieldHTML}<div class="field full"><label for="field-next_step">Nächster Schritt</label><input id="field-next_step" name="next_step" value="${escapeHTML(job.next_step)}" placeholder="Zum Beispiel: Wochenstunden und Präsenztage klären" maxlength="10000"></div><div class="field full"><label for="field-notes">Deine Notizen</label><textarea id="field-notes" name="notes" placeholder="Was ist dir an der Stelle wichtig?" maxlength="10000">${escapeHTML(job.notes)}</textarea></div></div><div class="detail-actions"><button class="primary-button" type="submit">Änderungen speichern</button><button class="secondary-button" type="button" id="retry-import"${job.import_state === "pending" ? " disabled" : ""}>${icon("refresh")}Neu einlesen</button><button class="text-button" type="button" id="archive-job">${job.archived ? "Aus Archiv holen" : "Archivieren"}</button></div></form><details class="source-details"><summary>Gespeicherte Stellenanzeige</summary><div class="original-text">${escapeHTML(job.description || "Noch kein Anzeigentext verfügbar.")}</div></details><details class="source-details"><summary>Anzeigentext selbst einfügen</summary><p class="subtle">Falls die Webseite nicht auslesbar ist: Kopiere die Anzeige hier hinein. Vorhandene manuelle Änderungen bleiben erhalten.</p><form id="paste-form" class="paste-area"><label class="sr-only" for="paste-text">Vollständiger Anzeigentext</label><textarea id="paste-text" placeholder="Jobtitel und vollständigen Anzeigentext einfügen …" minlength="80" maxlength="100000" required></textarea><button class="secondary-button" type="submit"${job.import_state === "pending" ? " disabled" : ""}>Angaben aus Text übernehmen</button></form></details>`;
+  $("#detail-content").innerHTML = `<div class="detail-header"><div class="company-name">${escapeHTML(job.company)}</div><h2>${escapeHTML(job.title || "Gespeicherter Stellenlink")}</h2><div class="flags">${job.flags.map(flag => `<span class="flag ${flag.kind}">${escapeHTML(flag.text)}</span>`).join("")}</div></div><div class="detail-links"><a href="${safeLink(job.url)}" target="_blank" rel="noopener noreferrer">${icon("external")}Originalanzeige</a>${safeLink(job.apply_url) ? `<a href="${safeLink(job.apply_url)}" target="_blank" rel="noopener noreferrer">${icon("briefcase")}Zum Bewerbungsportal</a>` : ""}</div><div class="notice${job.import_state === "error" ? " error" : ""}" role="status">${job.import_state === "pending" ? '<span class="spinner"></span> ' : ""}${escapeHTML(job.import_message || "Dein Link ist gespeichert.")}${job.imported_at ? `<br><small>Zuletzt eingelesen: ${date(job.imported_at)}</small>` : ""}</div><form id="detail-form" class="detail-form"><div class="field-grid"><div class="field full"><label for="field-status">Bewerbungsstatus</label><select name="status" id="field-status">${statusOptions(job.status)}</select></div>${fieldHTML}${jobClassificationFields(job)}<div class="field full"><label for="field-next_step">Nächster Schritt</label><input id="field-next_step" name="next_step" value="${escapeHTML(job.next_step)}" placeholder="Zum Beispiel: Wochenstunden und Präsenztage klären" maxlength="10000"></div><div class="field full"><label for="field-notes">Deine Notizen</label><textarea id="field-notes" name="notes" placeholder="Was ist dir an der Stelle wichtig?" maxlength="10000">${escapeHTML(job.notes)}</textarea></div></div><div class="detail-actions"><button class="primary-button" type="submit">Änderungen speichern</button><button class="secondary-button" type="button" id="retry-import"${job.import_state === "pending" ? " disabled" : ""}>${icon("refresh")}Neu einlesen</button><button class="text-button" type="button" id="archive-job">${job.archived ? "Aus Archiv holen" : "Archivieren"}</button></div></form><details class="source-details"><summary>Gespeicherte Stellenanzeige</summary><div class="original-text">${escapeHTML(job.description || "Noch kein Anzeigentext verfügbar.")}</div></details><details class="source-details"><summary>Anzeigentext selbst einfügen</summary><p class="subtle">Falls die Webseite nicht auslesbar ist: Kopiere die Anzeige hier hinein. Vorhandene manuelle Änderungen bleiben erhalten.</p><form id="paste-form" class="paste-area"><label class="sr-only" for="paste-text">Vollständiger Anzeigentext</label><textarea id="paste-text" placeholder="Jobtitel und vollständigen Anzeigentext einfügen …" minlength="80" maxlength="100000" required></textarea><button class="secondary-button" type="submit"${job.import_state === "pending" ? " disabled" : ""}>Angaben aus Text übernehmen</button></form></details>`;
   $("#detail-form").addEventListener("input", () => state.dirty = true);
   $("#paste-text").addEventListener("input", () => state.dirty = true);
   $("#detail-form").addEventListener("submit", async event => {
@@ -192,7 +205,7 @@ $("#import-form").onsubmit = async event => {
     replaceJob(data.job);
     $("#job-url").value = "";
     $("#import-feedback").textContent = data.created ? "Gespeichert. Die Details folgen automatisch." : "Diesen Link hast du bereits gespeichert.";
-    if (data.created) { state.view = "active"; $("#search").value = ""; $("#status-filter").value = ""; render(); }
+    if (data.created) { state.view = "active"; $("#search").value = ""; $("#status-filter").value = ""; $("#category-filter").value = ""; $("#job-type-filter").value = ""; render(); }
     else openDetail(data.job.id);
     load();
   } catch (error) { $("#import-feedback").textContent = error.message; }
@@ -201,13 +214,8 @@ $("#import-form").onsubmit = async event => {
 $("#search").addEventListener("input", render);
 $("#status-filter").addEventListener("change", render);
 $("#sort").addEventListener("change", render);
-document.querySelectorAll("[data-view]").forEach(button => button.onclick = () => { state.view = button.dataset.view; $("#search").value = ""; $("#status-filter").value = ""; render(); });
-$("#profile-button").onclick = () => {
-  const p = state.profile;
-  const pairs = [["Tätigkeit", p.role], ["Bevorzugte Branchen", (p.industries || []).join(" · ")], ["Ausgeschlossen", [...(p.excluded_industries || []), ...(p.excluded_cities || []).map(city => "Stadt " + city)].join(" · ") || "Noch nicht festgelegt"], ["Wunschregion", (p.cities || []).join(" · ")], ["Wochenstunden", p.hours], ["Remote & Präsenz", p.remote]];
-  $("#profile-content").innerHTML = pairs.map(([label, value]) => `<dt>${escapeHTML(label)}</dt><dd>${escapeHTML(value)}</dd>`).join("");
-  $("#profile-dialog").showModal();
-};
-$("#close-profile").onclick = () => $("#profile-dialog").close();
-window.addEventListener("beforeunload", event => { if (state.dirty) { event.preventDefault(); event.returnValue = ""; } });
+document.querySelectorAll("[data-view]").forEach(button => button.onclick = () => navigate(button.dataset.view));
+$("#category-filter").addEventListener("change", render);
+$("#job-type-filter").addEventListener("change", render);
+window.addEventListener("beforeunload", event => { if (state.dirty || profileDirty) { event.preventDefault(); event.returnValue = ""; } });
 load();

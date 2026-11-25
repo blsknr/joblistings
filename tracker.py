@@ -3,6 +3,8 @@ import json
 import os
 import sqlite3
 import threading
+import profiles
+from taxonomy import infer_job_type
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,14 +13,10 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("JOBLISTINGS_DATA_DIR", ROOT / "data"))
 STATUSES = ["Gespeichert", "In Vorbereitung", "Beworben", "Gespräch", "Angebot", "Absage", "Zurückgezogen"]
-DEFAULT_PROFILE = {
-    "role": "Werkstudent · Informatik",
-    "industries": [], "excluded_industries": [], "cities": [], "excluded_cities": [],
-    "hours": "Individuell festlegen", "hours_min": None, "hours_max": None, "hours_emergency_max": None,
-    "remote": "Individuell festlegen",
-}
-EDITABLE = {"title", "company", "location", "hours", "remote", "salary", "industry", "deadline", "status", "notes", "next_step", "archived"}
-IMPORT_FIELDS = {"title", "company", "location", "hours", "remote", "salary", "industry", "deadline", "description", "apply_url", "sources", "import_state", "import_message", "imported_at"}
+DEFAULT_PROFILE = profiles.DEFAULT_PROFILE
+
+EDITABLE = {"title", "company", "location", "hours", "remote", "salary", "industry", "deadline", "status", "notes", "next_step", "archived", "job_type", "category"}
+IMPORT_FIELDS = {"title", "company", "location", "hours", "remote", "salary", "industry", "deadline", "description", "apply_url", "sources", "import_state", "import_message", "imported_at", "job_type"}
 LOCK = threading.Lock()
 
 
@@ -27,13 +25,12 @@ def now():
 
 
 def get_profile():
-    path = DATA_DIR / "profile.json"
-    if not path.exists():
-        return dict(DEFAULT_PROFILE)
-    profile = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(profile, dict):
-        raise ValueError("data/profile.json muss ein JSON-Objekt enthalten.")
-    return {**DEFAULT_PROFILE, **profile}
+    return profiles.load(DATA_DIR)
+
+
+def update_profile(values):
+    with LOCK:
+        return profiles.save(DATA_DIR, get_profile(), values)
 
 
 @contextmanager
@@ -66,6 +63,15 @@ def initialize():
             import_state TEXT NOT NULL DEFAULT 'pending', import_message TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL, imported_at TEXT
         )""")
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
+        for column in ("job_type", "category"):
+            if column not in columns:
+                db.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+        if "job_type" not in columns:
+            for row in db.execute("SELECT id, title FROM jobs WHERE job_type=''").fetchall():
+                kind = infer_job_type(row["title"])
+                if kind:
+                    db.execute("UPDATE jobs SET job_type=? WHERE id=?", (kind, row["id"]))
         # A stopped import is retryable, never silently left spinning forever.
         db.execute("UPDATE jobs SET import_state='error', import_message='Import wurde unterbrochen. Bitte erneut versuchen.' WHERE import_state='pending'")
 
@@ -92,30 +98,53 @@ def match(job, profile=None):
     flags = []
     location = job.get("location", "")
     excluded_city = next((city for city in profile["excluded_cities"] if re.search(r"(?<!\w)" + re.escape(city) + r"(?!\w)", location, re.I)), None)
+    location_preferences = bool(profile["cities"] or profile["excluded_cities"])
     if excluded_city:
         flags.append({"kind": "excluded", "text": f"{excluded_city} ausgeschlossen"})
     elif any(city.casefold() in location.casefold() for city in profile["cities"]):
         flags.append({"kind": "good", "text": "Wunschregion"})
-    elif location:
+    elif location and profile["cities"]:
         flags.append({"kind": "check", "text": "Präsenztage klären"})
-    else:
+    elif not location and location_preferences:
         flags.append({"kind": "unknown", "text": "Standort offen"})
     industry = job.get("industry", "")
-    if industry in profile["excluded_industries"]:
+    if industry.casefold() in {item.casefold() for item in profile["excluded_industries"]}:
         flags.append({"kind": "excluded", "text": f"{industry} ausgeschlossen"})
-    elif industry in profile["industries"]:
+    elif industry and industry.casefold() in {item.casefold() for item in profile["industries"]}:
         flags.append({"kind": "good", "text": industry})
     hours = job.get("hours", "")
     numbers = [float(n.replace(",", ".")) for n in re.findall(r"\d+(?:[.,]\d+)?", hours)]
     minimum, maximum, emergency = (profile.get(key) for key in ("hours_min", "hours_max", "hours_emergency_max"))
-    if not numbers:
+    hours_preferences = any(number is not None for number in (minimum, maximum, emergency))
+    if not numbers and hours_preferences:
         flags.append({"kind": "unknown", "text": "Wochenstunden offen"})
-    elif minimum is not None and maximum is not None and all(minimum <= number <= maximum for number in numbers):
+    elif numbers and hours_preferences and all((minimum is None or minimum <= number) and (maximum is None or number <= maximum) for number in numbers):
         flags.append({"kind": "good", "text": "Stunden passen"})
     elif len(numbers) == 1 and maximum is not None and emergency is not None and maximum < numbers[0] <= emergency:
         flags.append({"kind": "check", "text": "Nur im Notfall"})
-    else:
+    elif numbers and hours_preferences:
         flags.append({"kind": "check", "text": "Stundenumfang klären"})
+    job_type = job.get("job_type", "")
+    if not job_type and "job_type" not in job.get("manual_fields", []):
+        job_type = infer_job_type(job.get("title", ""))
+    if profile.get("job_types"):
+        if not job_type:
+            flags.append({"kind": "unknown", "text": "Jobart offen"})
+        elif job_type.casefold() in {kind.casefold() for kind in profile["job_types"]}:
+            flags.append({"kind": "good", "text": "Jobart passt"})
+        else:
+            flags.append({"kind": "check", "text": "Andere Jobart: " + job_type})
+    model = profile.get("work_model", "any")
+    remote = job.get("remote", "")
+    if model != "any":
+        if not remote:
+            flags.append({"kind": "unknown", "text": "Arbeitsmodell offen"})
+        elif model == "remote_only" and "vollständig remote" not in remote.casefold():
+            flags.append({"kind": "check", "text": "Vollständig remote klären"})
+        elif model == "remote_preferred" and remote == "Vor Ort":
+            flags.append({"kind": "check", "text": "Remote-Wunsch prüfen"})
+        elif model == "onsite" and "vollständig remote" in remote.casefold():
+            flags.append({"kind": "check", "text": "Präsenzwunsch prüfen"})
     if job.get("remote"):
         flags.append({"kind": "info", "text": job["remote"]})
     return flags
@@ -126,6 +155,8 @@ def serialize(row):
     job["archived"] = bool(job["archived"])
     job["sources"] = json.loads(job["sources"])
     job["manual_fields"] = json.loads(job["manual_fields"])
+    if not job.get("job_type") and "job_type" not in job["manual_fields"]:
+        job["job_type"] = infer_job_type(job["title"])
     job["flags"] = match(job)
     return job
 
@@ -180,6 +211,8 @@ def update_job(job_id, values, imported=False):
             else:
                 if not isinstance(value, str) or len(value) > (100000 if key == "description" else 10000):
                     raise ValueError("Ungültiger Feldinhalt.")
+                if key == "category" and len(value) > 80:
+                    raise ValueError("Kategorien dürfen höchstens 80 Zeichen lang sein.")
                 if key == "status" and value not in STATUSES:
                     raise ValueError("Ungültiger Bewerbungsstatus.")
                 clean[key] = value

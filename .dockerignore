@@ -4,6 +4,8 @@
 !requirements.txt
 !app.py
 !tracker.py
+!profiles.py
+!taxonomy.py
 !importer.py
 !static/
 !static/**
